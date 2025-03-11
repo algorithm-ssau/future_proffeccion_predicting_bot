@@ -98,3 +98,17 @@ def decline_word(word: str, case: str) -> str:
     except Exception as e:
         print(f"Ошибка склонения слова {word}: {str(e)}")
         return word
+
+async def generate_image(prompt: str) -> bytes:
+    """Генерация изображения через Fusion Brain API"""
+    try:
+        model_id = fusion_brain_api.get_model()
+        uuid = fusion_brain_api.generate(prompt, model_id)
+        images = fusion_brain_api.check_generation(uuid)
+        if images:
+            # Декодируем base64 в бинарные данные
+            return base64.b64decode(images[0])
+        return None
+    except Exception as e:
+        print(f"Ошибка генерации изображения: {e}")
+        return None
