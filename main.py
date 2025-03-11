@@ -2,11 +2,18 @@ import json
 import time
 import requests
 import random
+import nest_asyncio
+from natasha import MorphVocab
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from professions import professions
 from cities import cities
 
+# Регистрируем nested event loop
+nest_asyncio.apply()
+
+# Инициализация морфологического анализатора
+morph = MorphVocab()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
