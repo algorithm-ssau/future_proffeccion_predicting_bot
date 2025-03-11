@@ -3,6 +3,7 @@ import time
 import requests
 import random
 import nest_asyncio
+import base64
 from natasha import MorphVocab
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -86,3 +87,14 @@ fusion_brain_api = Text2ImageAPI(
     api_key='1F9C14583FF95C530D2321E1C60A2200',
     secret_key='D68F219B46DCAFBF1E49E24094142B12'
 )
+
+def decline_word(word: str, case: str) -> str:
+    """Безопасное склонение слов с обработкой ошибок"""
+    try:
+        parsed = morph.parse(word)
+        if parsed and parsed[0].inflect({case}):
+            return parsed[0].inflect({case}).word
+        return word
+    except Exception as e:
+        print(f"Ошибка склонения слова {word}: {str(e)}")
+        return word
