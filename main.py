@@ -9,6 +9,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from professions import professions
 from cities import cities
+import BytesIO
 
 # Регистрируем nested event loop
 nest_asyncio.apply()
@@ -23,18 +24,59 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 async def generate_prediction(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Генерация предсказания и отправка изображения"""
     name = update.message.text
     profession = random.choice(professions)
     city = random.choice(cities)
 
+    # Склоняем слова
+    profession_acc = decline_word(profession, 'ablt')  # Творительный падеж
+    city_prep = decline_word(city, 'loct')  # Предложный падеж
+
     # Формируем текстовое предсказание
     response = (
         f"{name}, через 10 лет ты будешь:\n"
-        f"🔥 *{profession}* 🔥\n"
-        f"🌎 В *{city}*!\n\n"
+        f"🔥 *{profession_acc}* 🔥\n"
+        f"🌎 В *{city_prep}*!\n\n"
         "Это предсказание сгенерировано нейросетью 🤖"
     )
-    await update.message.reply_text(response, parse_mode="Markdown")
+
+    # Показываем анимацию загрузки
+    loading_message = await show_loading_messages(update, context)
+
+    # Генерация изображения
+    image_prompt = f"Профессия: {profession} в 2035 году. Покажи человека, которой работает по этой профессии"
+    image_data = await generate_image(image_prompt)
+
+    if image_data:
+        # Удаляем сообщение с анимацией
+        await loading_message.delete()
+
+        # Отправляем изображение как файл
+        await update.message.reply_photo(
+            photo=BytesIO(image_data),  # Используем BytesIO для передачи бинарных данных
+            caption=response,
+            parse_mode="Markdown"
+        )
+    else:
+        # Если изображение не сгенерировалось, отправляем только текст
+        await loading_message.delete()
+        await update.message.reply_text(response, parse_mode="Markdown")
+
+
+def run_bot():
+    """Функция для безопасного запуска бота"""
+    application = Application.builder().token("").build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, generate_prediction))
+
+    # Исправленный запуск бота
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(application.run_polling())
+
+
+if __name__ == "main":
+    run_bot()
 
 
 # Класс для работы с Fusion Brain API
