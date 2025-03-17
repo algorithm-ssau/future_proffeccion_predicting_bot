@@ -17,11 +17,26 @@ nest_asyncio.apply()
 # Инициализация морфологического анализатора
 morph = MorphVocab()
 
+if __name__ == "main":
+    run_bot()
+
+def run_bot():
+    """Функция для безопасного запуска бота"""
+    application = Application.builder().token("").build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, generate_prediction))
+
+    # Исправленный запуск бота
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(application.run_polling())
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "👋 Привет! Я генератор профессий будущего.\n"
         "Напиши своё имя и получи предсказание!"
     )
+
 
 async def generate_prediction(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Генерация предсказания и отправка изображения"""
@@ -62,21 +77,6 @@ async def generate_prediction(update: Update, context: ContextTypes.DEFAULT_TYPE
         # Если изображение не сгенерировалось, отправляем только текст
         await loading_message.delete()
         await update.message.reply_text(response, parse_mode="Markdown")
-
-
-def run_bot():
-    """Функция для безопасного запуска бота"""
-    application = Application.builder().token("").build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, generate_prediction))
-
-    # Исправленный запуск бота
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(application.run_polling())
-
-
-if __name__ == "main":
-    run_bot()
 
 
 # Класс для работы с Fusion Brain API
