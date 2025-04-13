@@ -1,191 +1,216 @@
+import logging
+import os
 import json
-import time
-import requests
-import random
-import nest_asyncio
 import base64
-from natasha import MorphVocab
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from professions import professions
-from cities import cities
-import BytesIO
-
-# Регистрируем nested event loop
-nest_asyncio.apply()
-
-# Инициализация морфологического анализатора
-morph = MorphVocab()
-
-if __name__ == "main":
-    run_bot()
-
-def run_bot():
-    """Функция для безопасного запуска бота"""
-    application = Application.builder().token("").build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, generate_prediction))
-
-    # Исправленный запуск бота
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(application.run_polling())
-
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        "👋 Привет! Я генератор профессий будущего.\n"
-        "Напиши своё имя и получи предсказание!"
-    )
-
-
-async def generate_prediction(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Генерация предсказания и отправка изображения"""
-    name = update.message.text
-    profession = random.choice(professions)
-    city = random.choice(cities)
-
-    # Склоняем слова
-    profession_acc = decline_word(profession, 'ablt')  # Творительный падеж
-    city_prep = decline_word(city, 'loct')  # Предложный падеж
-
-    # Формируем текстовое предсказание
-    response = (
-        f"{name}, через 10 лет ты будешь:\n"
-        f"🔥 *{profession_acc}* 🔥\n"
-        f"🌎 В *{city_prep}*!\n\n"
-        "Это предсказание сгенерировано нейросетью 🤖"
-    )
-
-    # Показываем анимацию загрузки
-    loading_message = await show_loading_messages(update, context)
-
-    # Генерация изображения
-    image_prompt = f"Профессия: {profession} в 2035 году. Покажи человека, которой работает по этой профессии"
-    image_data = await generate_image(image_prompt)
-
-    if image_data:
-        # Удаляем сообщение с анимацией
-        await loading_message.delete()
-
-        # Отправляем изображение как файл
-        await update.message.reply_photo(
-            photo=BytesIO(image_data),  # Используем BytesIO для передачи бинарных данных
-            caption=response,
-            parse_mode="Markdown"
-        )
-    else:
-        # Если изображение не сгенерировалось, отправляем только текст
-        await loading_message.delete()
-        await update.message.reply_text(response, parse_mode="Markdown")
-
-
-# Класс для работы с Fusion Brain API
-class Text2ImageAPI:
-    def init(self, url, api_key, secret_key):
-        self.URL = url
-        self.AUTH_HEADERS = {
-            'X-Key': f'Key {api_key}',
-            'X-Secret': f'Secret {secret_key}',
-        }
-
-    def get_model(self):
-        response = requests.get(self.URL + 'key/api/v1/models', headers=self.AUTH_HEADERS)
-        data = response.json()
-        return data[0]['id']
-
-    def generate(self, prompt, model, images=1, width=1024, height=1024):
-        params = {
-            "type": "GENERATE",
-            "numImages": images,
-            "width": width,
-            "height": height,
-            "generateParams": {
-                "query": f"{prompt}"
-            }
-        }
-
-        data = {
-            'model_id': (None, model),
-            'params': (None, json.dumps(params), 'application/json')
-        }
-        response = requests.post(self.URL + 'key/api/v1/text2image/run', headers=self.AUTH_HEADERS, files=data)
-        data = response.json()
-        return data['uuid']
-
-    def check_generation(self, request_id, attempts=10, delay=10):
-        while attempts > 0:
-            response = requests.get(self.URL + 'key/api/v1/text2image/status/' + request_id, headers=self.AUTH_HEADERS)
-            data = response.json()
-            if data['status'] == 'DONE':
-                return data['images']
-
-            attempts -= 1
-            time.sleep(delay)
-
-
-# Инициализация API
-fusion_brain_api = Text2ImageAPI(
-    url='https://api-key.fusionbrain.ai/',
-    api_key='1F9C14583FF95C530D2321E1C60A2200',
-    secret_key='D68F219B46DCAFBF1E49E24094142B12'
+from io import BytesIO
+from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InputMediaPhoto
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    ConversationHandler,
+    ContextTypes,
+    filters
 )
+from professions_dict import professions  # Импортируем словарь профессий
+import asyncio
 
-def decline_word(word: str, case: str) -> str:
-    """Безопасное склонение слов с обработкой ошибок"""
+# Настройка логирования
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# Состояния разговора
+NAME, GENDER, IT_INTEREST, MUSIC, DRINK, HOBBIES = range(6)
+
+# Обновленные варианты ответов
+GENDER_KEYBOARD = [["Парень", "Девушка"]]
+IT_KEYBOARD = [["Роботы", "Биотех"], ["ИИ", "Бэкенд"], ["Фронтенд", "Аналитика"]]
+MUSIC_KEYBOARD = [["Я меломан", "Рок"], ["Хип-хоп", "Ничего из этого"], ["Классика", "Джаз"]]
+DRINK_KEYBOARD = [["Кофе", "Чай"], ["Ни то, ни другое"]]
+HOBBIES_KEYBOARD = [["Спорт", "Кино"], ["Игры", "Книги"], ["Программирование", "Скроллить ленту"]]
+
+# Путь к папке с изображениями
+PROFESSIONS_IMAGES_DIR = "profession_images_sequential"
+user_data = {}
+
+# Mapping комбинаций ответов на ключи профессий
+PROFESSION_MAPPING = professions
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text(
+        "Привет! Как тебя зовут?",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    return NAME
+
+
+async def handle_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_data[update.message.from_user.id] = {"name": update.message.text}
+    await update.message.reply_text(
+        f"Приятно познакомиться, {update.message.text}!\n\nКто ты?",
+        reply_markup=ReplyKeyboardMarkup(GENDER_KEYBOARD, one_time_keyboard=True)
+    )
+    return GENDER
+
+
+async def handle_gender(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_data[update.message.from_user.id]["gender"] = update.message.text
+    await update.message.reply_text(
+        "Что тебе интересно в IT?",
+        reply_markup=ReplyKeyboardMarkup(IT_KEYBOARD, one_time_keyboard=True)
+    )
+    return IT_INTEREST
+
+
+async def handle_it(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_data[update.message.from_user.id]["it_interest"] = update.message.text
+    await update.message.reply_text(
+        "Какую музыку любишь?",
+        reply_markup=ReplyKeyboardMarkup(MUSIC_KEYBOARD, one_time_keyboard=True)
+    )
+    return MUSIC
+
+
+async def handle_music(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_data[update.message.from_user.id]["music"] = update.message.text
+    await update.message.reply_text(
+        "Кофе или чай?",
+        reply_markup=ReplyKeyboardMarkup(DRINK_KEYBOARD, one_time_keyboard=True)
+    )
+    return DRINK
+
+
+async def handle_drink(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_data[update.message.from_user.id]["drink"] = update.message.text
+    await update.message.reply_text(
+        "Чем занимаешься в свободное время?",
+        reply_markup=ReplyKeyboardMarkup(HOBBIES_KEYBOARD, one_time_keyboard=True)
+    )
+    return HOBBIES
+
+
+async def get_profession_image(profession_name: str, gender: str):
+    """Получаем изображение профессии в формате base64"""
     try:
-        parsed = morph.parse(word)
-        if parsed and parsed[0].inflect({case}):
-            return parsed[0].inflect({case}).word
-        return word
-    except Exception as e:
-        print(f"Ошибка склонения слова {word}: {str(e)}")
-        return word
+        # Формируем путь к файлу
+        image_path = os.path.join(PROFESSIONS_IMAGES_DIR, profession_name, f"{gender}.json")
+        logger.info(f"{image_path}")
 
-async def generate_image(prompt: str) -> bytes:
-    """Генерация изображения через Fusion Brain API"""
-    try:
-        model_id = fusion_brain_api.get_model()
-        uuid = fusion_brain_api.generate(prompt, model_id)
-        images = fusion_brain_api.check_generation(uuid)
-        if images:
-            # Декодируем base64 в бинарные данные
-            return base64.b64decode(images[0])
-        return None
+        if not os.path.exists(image_path):
+            return None
+
+        with open(image_path, 'r', encoding='utf-8') as f:
+            image_data = json.load(f)
+            return base64.b64decode(image_data["image_base64"])
     except Exception as e:
-        print(f"Ошибка генерации изображения: {e}")
+        logger.error(f"Error loading image: {e}")
         return None
 
-async def show_loading_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Анимация с изменяющимися сообщениями"""
-    messages  = [
-    "Нейросеть раскладывает карты таро 🃏",
-    "Языковые модели смотрят в будущее 👀",
-    "Алгоритм проверяет предсказания всех ясновидящих 🔮",
-    "Изучаем справочник перспективных профессий 📚",
-    "Нейросеть гадает на кофейное гуще ☕️",
-    "Нейросеть анализирует звездные карты 🌌",
-    "Искусственный интеллект изучает хрустальный шар 🔮",
-    "Алгоритмы предсказывают судьбу по линиям руки ✋",
-    "Нейросеть консультируется с оракулом 🧙‍♂️",
-    "Машинное обучение расшифровывает древние свитки 📜",
-    "ИИ изучает энергетические поля человека 🌟",
-    "Нейросеть читает будущее по облакам ☁️",
-    "Алгоритмы анализируют вибрации вселенной 🌠",
-    "ИИ раскладывает пасьянс из карт судьбы 🎴",
-    "Нейросеть изучает узоры на кофейной гуще ☕️",
-    "Алгоритмы предсказывают будущее по полету птиц 🦅",
-    "ИИ расшифровывает послания из параллельных миров 🌌",
-    "Нейросеть анализирует энергетические потоки 🌪",
-    "Алгоритмы изучают влияние планет на судьбу 🪐",
-    "ИИ предсказывает будущее по линиям на песке 🏖"
-]
+
+async def handle_hobbies(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    answers = user_data[update.message.from_user.id]
+    answers["hobbies"] = update.message.text
+
+    # Формируем ключ для поиска профессии (кортеж из ответов)
+    profile_key = (
+        answers.get('gender', ''),
+        answers.get('it_interest', ''),
+        answers.get('music', ''),
+        answers.get('drink', ''),
+        answers.get('hobbies', '')
+    )
+    # Для отладки выведем полученный ключ
+    logger.info(f"Поиск профессии для ключа: {profile_key}")
+
+    # Ищем профессию в нашем mapping-словаре
+    profession_base_name = PROFESSION_MAPPING.get(profile_key)
+
+    if not profession_base_name:
+        await update.message.reply_text("Извините, не смогли определить подходящую профессию для ваших ответов")
+        return ConversationHandler.END
+
+    # Формируем полный ключ для словаря профессий
+    gender_suffix = "male" if answers.get('gender') == "Парень" else "female"
+    profession_key = f"{profession_base_name}"
+
+    messages = [
+        "Нейросеть раскладывает карты таро 🃏",
+        "Языковые модели смотрят в будущее 👀",
+        "Алгоритм проверяет предсказания всех ясновидящих 🔮",
+        "Изучаем справочник перспективных профессий 📚",
+        "Нейросеть гадает на кофейное гуще ☕️",
+        "Нейросеть анализирует звездные карты 🌌"
+    ]
 
     # Отправляем первое сообщение
     message = await update.message.reply_text(messages[0])
 
-    # Меняем сообщение каждые 3 секунды
+    # Меняем сообщение каждые 0.7 секунды для более динамичной анимации
     for msg in messages[1:]:
-        await asyncio.sleep(5)
+        await asyncio.sleep(1)
         await message.edit_text(msg)
 
-    return message
+    # Добавляем финальное сообщение перед результатом
+    await asyncio.sleep(0.7)
+    await message.edit_text("🔮 Ваше предсказание от ИИ готово!")
+    await asyncio.sleep(1)
+
+    # Формируем сообщение
+    message_text = (
+        f"👤 {answers['name']}\n"
+        f"🚀 искуственный интеллект считает, что через 10 лет ты будешь {profession_base_name}\n"
+
+    )
+
+    # Пытаемся отправить изображение
+    try:
+        image_bytes = await get_profession_image(profession_key, gender_suffix)
+        if image_bytes:
+            await update.message.reply_photo(
+                photo=BytesIO(image_bytes),
+                caption=message_text
+            )
+        else:
+            await update.message.reply_text(
+                f"{message_text}\n\nКартинка еще не сгенерирована"
+            )
+    except Exception as e:
+        logger.error(f"Error sending image: {e}")
+        await update.message.reply_text(message_text)
+
+    return ConversationHandler.END
+
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text("Опрос отменен", reply_markup=ReplyKeyboardRemove())
+    return ConversationHandler.END
+
+
+def main():
+    application = ApplicationBuilder().token("").build()
+
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler('start', start)],
+        states={
+            NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_name)],
+            GENDER: [MessageHandler(filters.Regex('^(Парень|Девушка)$'), handle_gender)],
+            IT_INTEREST: [MessageHandler(filters.Regex('^(Роботы|Биотех|ИИ|Бэкенд|Фронтенд|Аналитика)$'), handle_it)],
+            MUSIC: [
+                MessageHandler(filters.Regex('^(Я меломан|Рок|Хип-хоп|Ничего из этого|Классика|Джаз)$'), handle_music)],
+            DRINK: [MessageHandler(filters.Regex('^(Кофе|Чай|Ни то, ни другое)$'), handle_drink)],
+            HOBBIES: [MessageHandler(filters.Regex('^(Спорт|Кино|Игры|Книги|Программирование|Скроллить ленту)$'),
+                                     handle_hobbies)]
+        },
+        fallbacks=[CommandHandler('cancel', cancel)]
+    )
+
+    application.add_handler(conv_handler)
+    application.run_polling()
+
+
+if __name__ == '__main__':
+    main()
